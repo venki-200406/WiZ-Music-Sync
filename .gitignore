@@ -1,0 +1,17 @@
+# Build output (PyInstaller) - device specific
+dist/
+build/
+*.spec
+
+# Python caches / virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
