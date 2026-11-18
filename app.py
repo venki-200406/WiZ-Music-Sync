@@ -754,7 +754,9 @@ class MainWindow(QWidget):
         self.find_btn.setEnabled(False)
         self.find_btn.setText("Searching…")
         self.set_status("Searching for WiZ bulbs on your network…")
-        threading.Thread(target=lambda: self.bridge.found.emit(core.discover()), daemon=True).start()
+        hint = self.ip_box.currentText().strip()
+        threading.Thread(target=lambda: self.bridge.found.emit(core.discover(hints=[hint] if hint else [])),
+                         daemon=True).start()
 
     def _on_found(self, found):
         self.find_btn.setEnabled(True)
@@ -769,7 +771,9 @@ class MainWindow(QWidget):
             self.set_status(f"Found {len(ips)} bulb{'s' if len(ips) > 1 else ''}: {', '.join(ips)}", "good")
         else:
             self.ip_box.setCurrentText(cur)
-            self.set_status("No bulbs found. Same Wi-Fi? Allow the app through Windows Firewall if asked.", "bad")
+            nets = ", ".join(core.local_ipv4s()) or "no network"
+            self.set_status(f"No bulbs found (this PC: {nets}). Is the bulb on this same Wi-Fi/hotspot? "
+                            "Also check Windows Firewall allows the app on Public networks.", "bad")
 
     def load_key_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "WiZ home export", "", "JSON (*.json);;All files (*.*)")

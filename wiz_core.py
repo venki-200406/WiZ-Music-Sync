@@ -27,29 +27,97 @@ WIZ_PORT = 38899
 
 
 # ============================================================================ WiZ bulb
-def discover(timeout=2.5):
-    """Broadcast getPilot; returns {ip: reply_dict}."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    s.settimeout(0.25)
-    msg = json.dumps({"method": "getPilot", "params": {}}).encode()
-    found, end, next_ping = {}, time.time() + timeout, 0.0
-    while time.time() < end:
-        if time.time() >= next_ping:
-            try:
-                s.sendto(msg, ("255.255.255.255", WIZ_PORT))
-            except OSError:
-                pass
-            next_ping = time.time() + 0.8
-        try:
-            data, addr = s.recvfrom(2048)
-            try:
-                found[addr[0]] = json.loads(data)
-            except ValueError:
-                found[addr[0]] = {}
-        except (socket.timeout, OSError):
+def local_ipv4s():
+    """This PC's IPv4 addresses (skips loopback and self-assigned 169.254.x.x)."""
+    ips = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.add(info[4][0])
+    except OSError:
+        pass
+    for probe in ("8.8.8.8", "10.255.255.255", "172.20.10.1", "192.168.1.1"):
+        try:                                      # route lookup only: no packet is sent
+            t = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            t.connect((probe, 9))
+            ips.add(t.getsockname()[0])
+            t.close()
+        except OSError:
             pass
-    s.close()
+    return sorted(ip for ip in ips if not ip.startswith(("127.", "169.254.", "0.")))
+
+
+def discover(timeout=2.5, hints=()):
+    """Find WiZ bulbs; returns {ip: reply_dict}.
+
+    Uses three methods together, because broadcast alone often fails on Windows
+    (hotspots, VPN / Hyper-V / WSL adapters, firewall on 'Public' networks):
+      1. broadcast to 255.255.255.255 and to each adapter's subnet broadcast
+      2. a direct message to every address in each adapter's /24 subnet
+         (direct replies get through the firewall like normal replies)
+      3. a direct message to any IP we already know (the saved bulb)
+    """
+    msg = json.dumps({"method": "getPilot", "params": {}}).encode()
+    local = local_ipv4s()
+    targets = []
+    for ip in local:
+        base = ip.rsplit(".", 1)[0]
+        targets += [f"{base}.{h}" for h in range(1, 255) if f"{base}.{h}" != ip]
+    targets = list(dict.fromkeys(list(hints) + targets))
+    bcasts = ["255.255.255.255"] + [ip.rsplit(".", 1)[0] + ".255" for ip in local]
+    if any(ip.startswith("172.20.10.") for ip in local):
+        bcasts.append("172.20.10.15")            # iPhone hotspot is a /28 network
+
+    socks = []
+    for bind_ip in [""] + local:                 # one socket per adapter so broadcasts leave on each
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            s.bind((bind_ip, 0))
+            s.setblocking(False)
+            socks.append(s)
+        except OSError:
+            pass
+    if not socks:
+        return {}
+
+    found = {}
+    end = time.time() + timeout
+    rounds = 0
+    while time.time() < end:
+        if rounds < 3:                           # send three rounds (UDP can drop packets)
+            for s in socks:
+                for b in bcasts:
+                    try:
+                        s.sendto(msg, (b, WIZ_PORT))
+                    except OSError:
+                        pass
+            for i, ip in enumerate(targets):
+                try:
+                    socks[0].sendto(msg, (ip, WIZ_PORT))
+                except OSError:
+                    pass
+                if i % 64 == 63:
+                    time.sleep(0.005)             # don't flood weak routers
+            rounds += 1
+        t_round = time.time() + 0.6
+        while time.time() < min(t_round, end):
+            got = False
+            for s in socks:
+                try:
+                    data, addr = s.recvfrom(2048)
+                except (BlockingIOError, OSError):
+                    continue
+                got = True
+                try:
+                    reply = json.loads(data)
+                except ValueError:
+                    continue
+                if reply.get("method") == "getPilot" and addr[0] not in local:
+                    found[addr[0]] = reply
+            if not got:
+                time.sleep(0.01)
+    for s in socks:
+        s.close()
     return found
 
 
